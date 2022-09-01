@@ -1,0 +1,712 @@
+
+```{r install-packages, include=FALSE, eval=FALSE}
+install.packages("openxlsx")
+install.packages("MASS")
+install.packages("dplyr")
+install.packages("cellWise")
+install.packages("rrcov")
+install.packages("gridExtra")
+install.packages("matlib")
+install.packages("factoextra")
+install.packages("tseries")
+install.packages("forecast")
+```
+
+```{r load-packages, include=FALSE, eval=TRUE, message=FALSE,warning=TRUE}
+require(openxlsx) 
+require(MASS) 
+require(dplyr)
+require(cellWise)
+require(rrcov)
+require(gridExtra)
+require(matlib)
+require(factoextra)
+require(tseries)
+require(forecast)
+```
+
+```{r Functions}
+#data generation
+hete_sample <- function(d,htsdtt,t,Sigma,on, delta,r){
+  mu = rep(0,d)
+  size <- rep_len(htsdtt, t) # #c(0.01, 0.01, 0.1, 0.1, 0.2, 0.5, 0.5,  0.2, 0.1, 0.1, 0.01, 0.01)
+  Limatrix <- lapply(size, function(x){result <-x*Sigma; return(result)})
+  sample <- matrix(NA, d, t)
+  for(i in 1:t){
+    sample[,i] <- mvrnorm(1, mu, Limatrix[[i]])
+  }
+  shift <- rep(delta, t-on)##*size(t-on+1):t]
+  sample[1:r, (on+1):t] <- sample[1:r, (on+1):t]+ shift
+  return(t(sample))
+}
+
+rand_sample <- function(d,htsdtt,t,Sigma,on, delta,r){
+  mu = rnorm(d,0,3) 
+  size <- rep_len(htsdtt, t) # #c(0.01, 0.01, 0.1, 0.1, 0.2, 0.5, 0.5,  0.2, 0.1, 0.1, 0.01, 0.01)
+  Limatrix <- lapply(size, function(x){result <-x*Sigma; return(result)})
+  sample <- matrix(NA, d, t)
+  for(i in 1:t){
+    sample[,i] <- mvrnorm(1, mu, Limatrix[[i]])
+  }
+  shift <- rep(delta, t-on) ##*sqrt(size[(t-on+1):t])
+  sample[1:r, (on+1):t] <- sample[1:r, (on+1):t]+shift
+  ic_mean <- rowMeans(sample[,1:on])
+  ic_sd <- apply(sample[,1:on], 1, sd)
+  sample <- (sample-ic_mean)/ic_sd
+  return(t(sample))
+} 
+
+####################### EWMA Rank #####################
+EWMA_Rank <- function(data, lambda, z0){
+  t <- dim(data)[1]
+  d <- dim(data)[2]
+  max_EWMA <- rep(0, t)
+  min_EWMA <- rep(0, t)
+  for (i in 1:t){
+    Data_I <- as.matrix(data[1:i,])
+    vec1 <- rev(c(0:(i-1)))
+    lamb_vec <- (1-lambda)^vec1
+    if(i==1){
+      R_I <- rank(Data_I)
+      EWM <- lamb_vec * R_I
+      EWMA_R <- lambda * EWM+ (1-lambda)^i*z0
+    }else{ 
+      R_I <- t(apply(Data_I, 1, rank)) #rank min = 1, max= d
+      EWM <- lamb_vec * R_I
+      EWMA_R <- lambda * colSums(EWM)+ z0*(1-lambda)^i}
+    max_EWMA[i] <- max(EWMA_R)
+    min_EWMA[i] <- min(EWMA_R)
+    }
+  result <- cbind(c(1:t), max_EWMA, min_EWMA)
+  result <- rbind(c(0, z0, z0), result)
+  return(result)
+}
+
+EWMAR_all <- function(data, lambda){
+  d <- ncol(data)
+  t <- nrow(data)
+  z0 <- (1+d)/2
+  EWMA_all <- rep(z0, d)
+  for (i in 1:t){
+    Data_I <- as.matrix(data[1:i,])
+    vec1 <- rev(c(0:(i-1)))
+    lamb_vec <- (1-lambda)^vec1
+    if(i==1){
+      R_I <- rank(Data_I)
+      EWM <- lamb_vec * R_I
+      EWMA_R <- lambda * EWM+ (1-lambda)^i*z0
+      }else{ 
+        R_I <- t(apply(Data_I, 1, rank)) #rank min = 1, max= d
+        EWM <- lamb_vec * R_I
+        EWMA_R <- lambda * colSums(EWM)+ (1-lambda)^i*z0}
+    EWMA_all <- rbind(EWMA_all, EWMA_R)
+    }
+  return(EWMA_all)
+} 
+
+CL <- function (t, z0, lambda, d, alpha){
+  tvec = c(1:t)
+  if (z0==0){
+    ymu <- (1+d)/2*(1-(1-lambda)^tvec)
+    }else{
+      ymu <- (1+d)/2
+      }
+  ysd <- sqrt((d^2-1)/12*lambda/(2-lambda)*(1-(1-lambda)^(2*tvec)))
+  max_ucl_the <- c(z0,qnorm((1-alpha)^(1/d), mean = ymu, sd = ysd))
+  min_lcl_the <- c(z0,qnorm(1-(1-alpha)^(1/d), mean = ymu, sd = ysd))
+  return(cbind(max_ucl_the, min_lcl_the))
+  }
+
+sim_EWMArank <- function(t,d,htsdtt,Sigma, lambda,z0,stand,delta,r,on, max_ucl_the, min_lcl_the){
+  if(stand ==TRUE){
+    Data_OC <- rand_sample(d,htsdtt,t,Sigma,on, delta,r)
+    }else{
+    #mu0 = rep(0, d)
+    #mu1 = c(rep(delta,r),rep(0,d-r)) + mu0
+    Data_OC <- hete_sample(d,htsdtt,t,Sigma,on, delta,r) #rbind(hete_sample(mu0,Sigma, htsdtt, on, d),hete_sample(mu1,Sigma, htsdtt, t-on, d))
+  }
+  EWMA <- EWMA_Rank(Data_OC, lambda, z0) 
+  max_EWMA <- EWMA[,2]
+  min_EWMA <- EWMA[,3]
+  signal_maxu <- EWMA[which(max_EWMA>max_ucl_the),1]
+  if( length(which(signal_maxu<on)) != 0 ){
+    max_fa = 1}else{max_fa =0}
+  if(length(which(signal_maxu>=on)) !=0 ){
+    max_dr = 1}else{max_dr = 0}
+  if(length(signal_maxu)!=0){
+    max_fs <- min(signal_maxu)}else{max_fs=NA}
+  max_CED <- (signal_maxu[which(signal_maxu>=on)[1]]-on)
+  
+  signal_minl <- EWMA[which(min_EWMA<min_lcl_the),1]
+  if (length(which(signal_minl<on))!=0){
+    min_fa = 1}else{min_fa = 0}
+  if( length(which(signal_minl>=on)) != 0 ){
+    min_dr = 1}else{min_dr = 0}
+  if(length(signal_minl)!=0){
+    min_fs <- min(signal_minl)}else{min_fs=NA}
+  min_CED <- (signal_minl[which(signal_minl>=on)[1]]-on)
+  
+  max_sta <- c(max_fs, max_CED, max_fa, max_dr)
+  min_sta <- c(min_fs, min_CED, min_fa, min_dr)
+  return(rbind(max_sta, min_sta))
+}
+
+a_search <- function(Data_IC, FAP, n, alpha, D, e){
+  FAP_hat <- c(0,0)
+  FAR_hat <- c(0,0)
+  while (abs(FAP_hat[1]-FAP)+abs(FAP_hat[2]-FAP)>2*D){
+    FA = c(NA, NA)
+    FAR = c(NA, NA)
+    print(alpha)
+    cl <- CL(n, z0, lambda, d, alpha)
+    max_ucl_the <- cl[,1]
+    min_lcl_the <- cl[,2]
+    for(i in 1:2000){
+      sam_data<-Data_IC[sample(c(1:nrow(Data_IC)),
+                               n,replace=TRUE),]
+      EWMA <- EWMA_Rank(sam_data, lambda, z0) 
+      max_EWMA <- EWMA[,2]
+      min_EWMA <- EWMA[,3]
+      signal_maxu <- EWMA[which(max_EWMA>max_ucl_the),1]
+      if( length(which(signal_maxu<n)) != 0 ){
+        max_fa = 1}else{max_fa =0}
+      signal_minl <- EWMA[which(min_EWMA<min_lcl_the),1]
+      if (length(which(signal_minl<n))!=0){
+        min_fa = 1}else{min_fa = 0}
+      FAR <- rbind(FAR, c(length(which(signal_maxu<=n)), length(which(signal_minl<=n))))
+      FA <- rbind(FA ,c(max_fa, min_fa))
+      }
+    FAP_hat <- as.numeric(colMeans(FA, na.rm = TRUE))
+    FAR_hat <- as.numeric(colMeans(FAR, na.rm = TRUE)/n)
+    if(FAP_hat[1]-FAP+FAP_hat[2]-FAP>2*D){
+      alpha <- alpha-e
+      }else if(FAP_hat[1]-FAP+FAP_hat[2]-FAP<2*(-D)){
+        alpha <- alpha+e
+        }
+    print(FAP_hat)
+    }
+  return(c(alpha, FAP_hat, FAR_hat))
+}
+
+variable_diag <- function(EWMA_all, EWMA_CL,increase,on,back, W){
+  if(increase ==TRUE){
+  max_ucl <- EWMA_CL[,1]
+  signal <- which(EWMA_all > max_ucl, arr.ind = T)
+  signal <- signal[order(signal[,1]),]
+  signal1 <- signal[which(signal[,1] >= on, arr.ind = T),]
+  max_var <- signal1[1,2]
+  if (back==TRUE){
+    EWMA_all_S <- EWMA_all[(signal1[1,1]-W+1):signal1[1,1],]
+    }else{
+      EWMA_all_S <- EWMA_all[signal1[1,1]:(signal1[1,1]+W-1),]
+      }
+  max_center <- as.numeric(EWMA_all_S[,max_var])
+  min_center <- as.numeric(apply(EWMA_all_S, 1, min))
+  mid_center <- rep((1+d)/2, length(max_center))
+  a <- kmeans(t(EWMA_all_S), centers = rbind(max_center, mid_center, min_center), iter.max = 20, nstart = 5)#
+  }else{
+    min_lcl <- EWMA_CL[,2]
+    signal <- which(EWMA_all < min_lcl, arr.ind = T)
+    signal <- signal[order(signal[,1]),]
+    signal1 <- signal[which(signal[,1] >= on, arr.ind = T),]
+    min_var <- signal1[1,2]
+    if (back==TRUE){
+      EWMA_all_S <- EWMA_all[(signal1[1,1]-W+1):signal1[1,1],]
+      }else{
+        EWMA_all_S <- EWMA_all[signal1[1,1]:(signal1[1,1]+W-1),]
+        }
+    min_center <- as.numeric(EWMA_all_S[,min_var])
+    max_center <- as.numeric(apply(EWMA_all_S, 1, max))
+    mid_center <- rep((1+d)/2, length(max_center))
+    a <- kmeans(t(EWMA_all_S), centers = rbind(min_center, max_center, mid_center), iter.max = 20, nstart = 5)#
+  }
+  result <- list(signal, signal1[1,], a)
+  names(result) <- c("all_signals", "target_signal","k-mean")
+  return(result)
+}
+
+cpe <- function(EWMA_all, cluster_list, increase){
+  OC_EWMA <- EWMA_all[1:cluster_list$target_signal[1], which(cluster_list$`k-mean`$cluster==1,arr.ind= T)]
+  cp_W <- NA
+  cp <- NA
+  if (increase==TRUE){
+    if(cluster_list$`k-mean`$size[1]==1){
+    sig_p <- cluster_list$target_signal
+    y <- as.numeric(EWMA_all[1:sig_p[1],sig_p[2]])#
+    cp <- c(cp,max(which(y-(1+d)/2<0)))
+    cp[is.infinite(cp)] <- NA 
+    }else{
+      sig_p <- cluster_list$target_signal
+      for (j in 1:cluster_list$`k-mean`$size[1]){
+        v <- as.numeric(OC_EWMA[,j])
+        cp_W <-c(cp_W, max(which(v-(1+d)/2<0)))
+        }
+      y <- as.numeric(EWMA_all[1:sig_p[1],sig_p[2]])#
+      cp <- c(cp,max(which(y-(1+d)/2<0)))
+      cp[is.infinite(cp)] <- NA 
+      cp_W[is.infinite(cp_W)] <- NA 
+      }
+  }else{
+      if(cluster_list$`k-mean`$size[1]==1){
+        sig_p <- cluster_list$target_signal
+        y <- as.numeric(EWMA_all[1:sig_p[1],sig_p[2]])#
+        cp <- c(cp,max(which(y-(1+d)/2>0)))
+        cp[is.infinite(cp)] <- NA 
+        }else{
+          sig_p <- cluster_list$target_signal
+          for (j in 1:cluster_list$`k-mean`$size[1]){
+            v <- as.numeric(OC_EWMA[,j])
+            cp_W <-c(cp_W, max(which(v-(1+d)/2>0)))
+            }
+          y <- as.numeric(EWMA_all[1:sig_p[1],sig_p[2]])#
+          cp <- c(cp,max(which(y-(1+d)/2>0)))
+          cp[is.infinite(cp)] <- NA 
+          cp_W[is.infinite(cp_W)] <- NA 
+        }
+    }
+  return(list(cp, cp_W))
+}
+```
+
+```{r Setting and Data Generation}
+########################## different heteroscedasticity ##################
+het <- list(seq(0.1, 1.9, 0.1)^2, seq(0.1, 1.9, 0.3)^2, 
+            seq(0.5, 1.5, 0.1)^2, seq(0.5, 1.5, 0.25)^2, 
+            seq(0.8, 1.2, 0.1)^2, seq(0.8, 1.2, 0.2)^2, 
+            seq(0.1, 2.9, 0.1)^2, seq(0.1, 2.9, 0.4)^2, 
+            seq(0.5, 2.5, 0.1)^2, seq(0.5, 2.5, 0.5)^2, 
+            seq(1, 2, 0.1)^2, seq(1, 2, 0.25)^2) #group of heteroscedasicity
+```
+
+```{r data driven control limits}
+d = 500  #20,30, 50, 70, 100, 120, 150
+htsdtt <- c(seq(0.1, 1.9, 0.1)^2, rev(seq(0.1, 1.9, 0.1)^2))
+#Sigma = diag(d) #Sigma1 
+#Sigma = generateCorMat(d, corrType = "A09") #Sigma2 
+Sigma = abs(generateCorMat(d, corrType="A09")) #Sigma3
+lambda = 0.1
+z0 = (1+d)/2
+t = 3000
+on = 2000
+#Data_IC <- scale(mvrnorm(on,rnorm(d,0,3),Sigma),
+#                 center = TRUE,scale=TRUE) 
+Data_IC<-hete_sample(d,htsdtt,t,Sigma,on,delta,r)[1:on,] #
+#matplot(Data_IC, type = "l")
+#Data_IC <- rand_sample(d,htsdtt,t,Sigma, on, 0,0)[1:on,]
+
+print(d)
+FAP = 0.1
+alpha = 0.005 #FAR = 0.005*2 = 0.01
+D = 0.01
+e = 0.001
+a_search(Data_IC, FAP,n=100, alpha, D, e)
+```
+
+```{r EWMA_R control chart -- phase II }
+####################### Rank EWMA chart ###################
+d = 500  #20 50 100 #d-dimensionality 
+htsdtt <- c(seq(0.1, 1.9, 0.1)^2, rev(seq(0.1, 1.9, 0.1)^2)) #htsdtt-heteroscedasticity
+lambda = 0.1 #lambda-smoothing paramter
+t = 200 ##t-length of process
+on =  100 ##on-change point
+z0 = (1+d)/2 #z0-starting point
+stand = FALSE #stand-equal mean or not
+delta = 1 #delta-shift size
+r = 5 #r-number of shift variables
+S= 100
+
+################### simulation ###################
+################## sigma 1 ####################
+#start_time <- Sys.time()
+Sigma = diag(d) #Sigma1 
+alpha = 0.01 #FAR#########
+EWMA_CL <- CL(t, z0, lambda, d, alpha)
+max_ucl_the <- EWMA_CL[,1]
+min_lcl_the <- EWMA_CL[,2]
+
+max_RL <- rep(NA, 4)
+min_RL <- rep(NA, 4)
+for(s in 1:S){
+  result <- sim_EWMArank(t,d,htsdtt,Sigma, lambda,z0,stand,delta,r,on, max_ucl_the, min_lcl_the)
+  max_RL = rbind(max_RL, result[1,])
+  min_RL = rbind(min_RL, result[2,])
+}
+max_RL <- replace(max_RL, is.infinite(max_RL), NA)
+min_RL <- replace(min_RL, is.infinite(min_RL), NA)
+
+print(paste("sig1",alpha, d,stand,delta,r, on))
+apply(max_RL, 2, mean, na.rm = TRUE)
+apply(min_RL, 2, mean, na.rm = TRUE)
+###################### sigma 2 ####################
+Sigma = generateCorMat(d, corrType = "A09") #Sigma2 "ALYZ"
+alpha = 0.011 #FAR
+EWMA_CL <- CL(t, z0, lambda, d, alpha)
+max_ucl_the <- EWMA_CL[,1]
+min_lcl_the <- EWMA_CL[,2]
+
+max_RL <- rep(NA, 4)
+min_RL <- rep(NA, 4)
+for(s in 1:S){
+  result <- sim_EWMArank(t,d,htsdtt,Sigma, lambda,z0,stand,delta,r,on, max_ucl_the, min_lcl_the)
+  max_RL = rbind(max_RL, result[1,])
+  min_RL = rbind(min_RL, result[2,])
+}
+max_RL <- replace(max_RL, is.infinite(max_RL), NA)
+min_RL <- replace(min_RL, is.infinite(min_RL), NA)
+
+print(paste("sig2",alpha, d,stand,delta,r, on))
+apply(max_RL, 2, mean, na.rm = TRUE)
+apply(min_RL, 2, mean, na.rm = TRUE)
+#(Sys.time()-start_time)/S
+####################sigma 3####################
+Sigma = abs(generateCorMat(d, corrType = "A09")) #Sigma3
+alpha = 0.013 #FAR
+EWMA_CL <- CL(t, z0, lambda, d, alpha)
+max_ucl_the <- EWMA_CL[,1]
+min_lcl_the <- EWMA_CL[,2]
+
+max_RL <- rep(NA, 4)
+min_RL <- rep(NA, 4)
+for(s in 1:S){
+  result <- sim_EWMArank(t,d,htsdtt,Sigma,lambda,z0,stand,delta,r,on, max_ucl_the, min_lcl_the)
+  max_RL = rbind(max_RL, result[1,])
+  min_RL = rbind(min_RL, result[2,])
+}
+max_RL <- replace(max_RL, is.infinite(max_RL), NA)
+min_RL <- replace(min_RL, is.infinite(min_RL), NA)
+
+print(paste("sig3", alpha, d,stand,delta,r, on))
+apply(max_RL, 2, mean, na.rm = TRUE)
+apply(min_RL, 2, mean, na.rm = TRUE)
+#end_time <- Sys.time()
+```
+
+```{r signal diagnosis}
+############# Draw a chart #################
+d = 500 #20 50 100 #d-dimensionality 
+#Sigma = diag(d) #Sigma1 
+#Sigma = generateCorMat(d, corrType = "A09") #Sigma2 "ALYZ" 
+Sigma = abs(generateCorMat(d, corrType = "A09")) #Sigma3 
+heatmap(Sigma, Rowv = NA,  Colv = "Rowv")
+alpha <- 0.013
+increase =TRUE
+delta = 1
+############
+W=5
+htsdtt <- c(seq(0.1, 1.9, 0.1)^2, rev(seq(0.1, 1.9, 0.1)^2))
+lambda = 0.1 #lambda-smoothing paramter
+t = 200 ##t-length of process
+on =  100 ##on-change point
+z0 = (1+d)/2 #(1+d)/2 #z0-starting point
+r = 50 #r-number of shift variables
+###### Back ######
+back = TRUE
+TP_rate <- rep(NA,2)
+CP_mat <- matrix(NA, 1000, 500)
+for(s in 1:100){
+  Data_OC <- hete_sample(d,htsdtt,t,Sigma,on, delta,r)
+  EWMA_all <- EWMAR_all(Data_OC, lambda)
+  EWMA_CL <- CL(t, z0, lambda, d, alpha)
+  cluster_list <- variable_diag(EWMA_all, EWMA_CL, increase, on, back, W)
+  TP <- length(which(which(cluster_list$`k-mean`$cluster==1,arr.ind= T)<=r))
+  TP_rate <-rbind(TP_rate,c(TP/cluster_list$`k-mean`$size[1], TP/r))
+  cps<-cpe(EWMA_all,cluster_list,increase)[[2]]
+  CP_mat[s, 1:length(cps)] <- cps
+}
+print(c(d, back, delta))
+colMeans(TP_rate, na.rm=T)
+cp_mat <- CP_mat[rowSums(is.na(CP_mat)) != ncol(CP_mat), ]
+c(mean(apply(cp_mat, 1, min, na.rm=TRUE)),
+mean(apply(cp_mat, 1, max, na.rm=TRUE)))
+
+###### Forward ######
+back = FALSE
+TP_rate <- rep(NA,2)
+CP_mat <- matrix(NA, 1000, 500)
+for(s in 1:100){
+  Data_OC <- hete_sample(d,htsdtt,t,Sigma,on, delta,r)
+  EWMA_all <- EWMAR_all(Data_OC, lambda)
+  EWMA_CL <- CL(t, z0, lambda, d, alpha)
+  cluster_list <- variable_diag(EWMA_all,
+                EWMA_CL,increase, on, back, W)
+  TP <- length(which(which(cluster_list$`k-mean`$cluster==1,arr.ind= T)<=r))
+  TP_rate <-rbind(TP_rate,c(TP/cluster_list$`k-mean`$size[1], TP/r))
+  cps <- cpe(EWMA_all, cluster_list,
+             increase)[[2]]
+  CP_mat[s, 1:length(cps)] <- cps
+}
+print(c(d, back, delta))
+colMeans(TP_rate, na.rm=T)
+cp_mat <- CP_mat[rowSums(is.na(CP_mat)) != ncol(CP_mat), ]
+c(mean(apply(cp_mat, 1, min, na.rm=TRUE)),
+mean(apply(cp_mat, 1, max, na.rm=TRUE)))
+```
+
+```{r MTR case study}
+#### data processing ####
+df <- na.omit(read.csv("Siu Hong_E9_healthind_g.csv", row.names = 1))
+IC_df <- df[1:566,79:104]# #53:78 79:104
+OC_df <- df[567:610,79:104]#53:78 79:104
+ic_mean <- colMeans(IC_df, na.rm = TRUE)
+ic_sd <- apply(IC_df, 2, sd)
+IC_df <- t(t(sweep(IC_df, 2, ic_mean, "-"))/ic_sd)
+OC_df <- t(t(sweep(OC_df, 2, ic_mean, "-"))/ic_sd)
+r_cp <- c(max(which(grepl("2021.09.13", rownames(OC_df))==TRUE)),
+          max(which(grepl("2021.09.29", rownames(OC_df))==TRUE)))
+date <- substr(rownames(OC_df), 4, 11)
+#### build control charts ####
+d <- ncol(IC_df)
+lambda <- 0.2
+z0 <- (1+d)/2
+FAP=0.1
+alpha = 0.008
+D=0.02
+e=0.0005
+alpha_cl <- a_search(IC_df, FAP, 100, alpha, D, e)
+
+t <- nrow(OC_df)
+cl <- CL(t, z0, lambda, d,alpha_cl[1])#0.008
+monitor_data <- EWMA_Rank(OC_df, lambda, z0)
+
+signal <- which(monitor_data[,3]<cl[,2])
+color <- rep(1, length(monitor_data[,3]))
+color[signal] <- 2
+plot(monitor_data[,3], type = "l", lwd=2, ylab=NA,xlab=NA, xaxt = "n",main = "LR-EWMA chart for Tension Carriage") #Main Drive | Motor | Tension Carriage 
+points(monitor_data[,3], cex=1,pch=16, col=color)
+lines(cl[,2], col=2, lwd=2)
+axis(1, at=seq(1,45,4), labels=seq(0,44,4))
+#axis(1, at=seq(1,44,7), labels=date[seq(1,44,7)])
+#abline(v=17, col=2)#signal[1]
+#abline(v=r_cp, col=1)
+
+signal <- which(monitor_data[,2]>cl[,1])
+color <- rep(1, length(monitor_data[,2]))
+color[signal] <- 2
+plot(monitor_data[,2], type = "l",ylab = NA, xlab=NA, xaxt = "n", lwd=2,main = "UR-EWMA chart for Tension Carriage")#,paste("Signal at", signal[1])
+points(monitor_data[,2], cex=1,pch=16, col=color)
+lines(cl[,1], col=2, lwd=2)
+axis(1, at=seq(1,45,4), labels=seq(0,44,4))
+#abline(v=signal[1], col=2)
+#abline(v=r_cp, col=1)
+#############signal diagnosis###################
+EWMA_all <- EWMAR_all(OC_df, lambda)
+signal_min <- which(EWMA_all < cl[,2], arr.ind = T)
+signal_min <- signal_min[order(signal_min[,1]),]
+
+signal_max <- which(EWMA_all > cl[,1], arr.ind = T)
+signal_max <- signal_max[order(signal_max[,1]),]
+#############
+```
+
+```{r diagnosis - min}
+#### min ####
+W=3
+signal_minat <- 17 #9#17
+min_var <- 3 #3 
+#EWMA_all_S<-EWMA_all[(signal_minat-W+1):signal_minat,]
+EWMA_all_S<-EWMA_all[signal_minat:(signal_minat+W-1),]
+min_center <- as.numeric(EWMA_all_S[,min_var])
+max_center <- as.numeric(apply(EWMA_all_S, 1, max))
+mid_center <- rep((1+d)/2, length(max_center))
+a <- kmeans(t(EWMA_all_S), centers = rbind(min_center, max_center, mid_center), iter.max = 20, nstart = 5)# 
+
+#plot_to <- signal_minat
+plot_to <- signal_minat+W-1
+
+min_EWMA <- EWMA_all[1:signal_minat,which(a$cluster==1,arr.ind= T)]
+cp_W1 <- NA
+for (j in 1:a$size[1]){
+    v <- as.numeric(min_EWMA[,j])
+    cp_W1 <-c(cp_W1, max(which(v-(1+d)/2>0)))
+}
+cp_W1[is.infinite(cp_W1)] <- NA  
+
+var_min <- as.numeric(which(a$cluster==1))
+shift <- OC_df[1:(plot_to-1), var_min]
+matplot(shift, col=1, type = "b", ylab = NA, lwd=2, xaxt="n", pch=16,main="Decreasing health indicators")
+axis(1, at=seq(2,plot_to,3), labels=date[seq(2,plot_to,3)-1])
+
+
+matplot(EWMA_all[1:plot_to,var_min],type="b",ylab=NA,pch = 16,lwd=2,col =1,xaxt="n",main="EWMA statistics for decreasing variables") # , 
+#abline(v=signal_minat, col=1)
+axis(1, at=seq(2,plot_to,3), labels=date[seq(2,plot_to,3)-1])
+abline(h=z0, col=2, lwd=2)
+lines(cl[,2], col=2, lwd=2)
+x <- c(min(cp_W1, na.rm = T),max(cp_W1, na.rm = T),max(cp_W1, na.rm = T), min(cp_W1, na.rm = T))
+y <- c(15, 15, 3, 3)
+polygon(x, y, col = "#BB50BB1D")
+legend("topright", legend = "Pink interval is the estimated change time", col = "#BB50BB1D")
+
+a <- rep(1,ncol(OC_df))
+a <- replace(a, var_min, 2) 
+matplot(OC_df[1:plot_to, ], col=a, type = "b", ylab = NA, lwd=2, pch=16, xaxt="n")
+axis(1, at=seq(2,plot_to,3), labels=date[seq(2,plot_to,3)-1])
+
+colnames(OC_df)[var_min]
+
+```
+
+```{r diagnosis - max}
+#### max ####
+W=3
+signal_maxat <- 19 #11#19 
+max_var <- 9 #16
+#EWMA_all_S<-EWMA_all[(signal_maxat-W+1):signal_maxat,]
+EWMA_all_S<-EWMA_all[signal_maxat:(signal_maxat+W-1),]
+max_center <- as.numeric(EWMA_all_S[,max_var])
+min_center <- as.numeric(apply(EWMA_all_S, 1, min))
+
+#plot_to <- signal_maxat
+plot_to <- signal_maxat+W-1
+
+mid_center <- rep((1+d)/2, length(max_center))
+a <- kmeans(t(EWMA_all_S),centers=rbind(max_center,min_center, mid_center), iter.max = 20, nstart = 5)# 
+
+max_EWMA <- EWMA_all[1:signal_maxat,which(a$cluster==1,arr.ind= T)]
+cp_W2 <- NA
+for (j in 1:a$size[1]){
+    v <- as.numeric(max_EWMA[,j])
+    cp_W2 <-c(cp_W2, max(which(v-(1+d)/2<0)))
+    }
+cp_W2[is.infinite(cp_W2)] <- NA  
+
+var_max <- as.numeric(which(a$cluster==1))
+shift <- OC_df[1:(plot_to-1), var_max]
+matplot(shift, type = "b", ylab = NA, col=1, lwd=2, pch=16, xaxt="n",main="Increasing health indicators")
+axis(1, at=seq(2,plot_to,3), labels=date[seq(2,plot_to,3)-1])
+
+matplot(EWMA_all[1:plot_to, var_max], type = "b",  ylab = NA, col=1, lwd=2, pch=16, xaxt="n",main="EWMA statistics for increasing variables")
+#abline(v=signal_maxat, col=1)
+axis(1, at=seq(2,plot_to,3), labels=date[seq(2,plot_to,3)-1])
+abline(h=z0, col=2, lwd=2)
+lines(cl[,1], col=2, lwd=2)
+x <- c(min(cp_W2, na.rm = T),max(cp_W2, na.rm = T),max(cp_W2, na.rm = T), min(cp_W2, na.rm = T))
+y <- c(25, 25, 5, 5)
+polygon(x, y, col = "#BB50BB1D")
+
+a <- rep(1,ncol(OC_df))
+a <- replace(a, var_max, 2) 
+matplot(OC_df[1:plot_to, ], col=a, type = "b", ylab = NA, lwd=2, pch=16, xaxt="n")
+axis(1, at=seq(2,plot_to,3), labels=date[seq(2,plot_to,3)-1])
+
+colnames(OC_df)[var_max]
+```
+
+```{r MTR case plot}
+#### data processing ####
+TC_DE <- read.csv("Tension Carriage Left (DE).csv", row.names = 1)
+TC_NDE <- read.csv("Tension Carriage Right (NDE).csv", row.names = 1)
+
+at <- seq(1,500,100)
+
+plot(TC_DE[1:500,1], type = "l", lwd=2, ylab="Amplitude", xlab= NA,  xaxt = 'n')#"Frequency"
+axis(1, at=at, labels=rownames(TC_DE)[at])
+lines(TC_NDE[1:500,2], col=2, lwd=2)
+legend("topright", legend = c("Tension Carriage left","Tension Carriage Right" ), col=c(1,2), lty = 1)
+
+matplot(TC_NDE[1:500,175:185], type = "l", lwd=1, ylab="Amplitude", xlab= "Frequency",  xaxt = 'n', col=1, main="20 Acceleration Spectrum for SiuE9 TC_R before change")
+axis(1, at=at, labels=rownames(TC_DE)[at])
+
+matplot(TC_NDE[1:500,900:910], type = "l", lwd=1, ylab="Amplitude", xlab= "Frequency",  xaxt = 'n', col=1, main="20 Acceleration Spectrum for SiuE9 TC_R after change")
+axis(1, at=at, labels=rownames(TC_DE)[at])
+
+date <- substr(rownames(IC_df), 4, 11)
+plot(IC_df[,1], type="l", main= "At value of TC_L", xaxt="n", xlab="Date", ylab=NA)
+axis(1, at=seq(1,566,80), labels=date[seq(1,566,80)],srt = 45)
+
+date <- substr(rownames(IC_df), 4, 11)
+matplot(IC_df, type="l", main= "HI for Tension Carriage from Jan4 to Sep06", xaxt="n", xlab="Date", ylab=NA, ylim = c(-6,6))
+axis(1, at=seq(1,566,80), labels=date[seq(1,566,80)])
+
+date <- substr(rownames(OC_df), 4, 11)
+matplot(OC_df, type="l", main= "HI for Tension Carriage, from Sep07 to Oct11", xaxt="n", xlab="Date", ylab=NA, ylim = c(-6,6))
+axis(1, at=seq(1,44,7), labels=date[seq(1,44,7)])
+
+matplot(IC_df[1:3,], type="p", main= "HI for Tension Carriage in Jan4", xlab=NA, ylab=NA, pch = 16, xaxt="n")
+
+##### heteroscedastic health index #####
+b <- row.names(IC_df)
+d<- as.numeric(substring(b, 13,14))
+sd_mat <- matrix(NA, ncol = ncol(IC_df), nrow = 28)
+
+for(j in 1:ncol(IC_df)){
+  for(i in 6:23){
+  rush <- which(d==i)
+  #print(length(rush))
+  sd_mat[i,j] <- var(IC_df[rush, j])
+  }
+}
+sd_mat1 <- na.omit(sd_mat)
+
+hours <- c("6:00", "9:00", "12:00", "15:00", "18:00", "21:00")
+matplot(sd_mat1, type = "l", col = 1, ylab = "Variance", lwd=1, xaxt="n")
+lines(rowMeans(sd_mat1), col=2, lwd=3)
+axis(1, at=seq(1,18,3), labels=hours)
+
+```
+
+
+
+```{r}
+time_mat = matrix( c(0.35,	22.42, 
+                     0.47,	72.46,
+                     0.88,	136.06,
+                     NA,  NA,
+                     0.39,	32.48,
+                     0.51,	72.94,
+                     1.15,	147.83,
+                     NA,   NA,
+                     0.39,	27.99,
+                     0.51,	67.58,
+                     1.12,	142.73), ncol=2, byrow = TRUE)
+
+time_mat[,2] <- time_mat[,2]/10
+
+matplot(time_mat, type = "b", pch = c(16,17), ylab = "Seconds", lwd=3, col=1, cex=1.5, xaxt = "n", yaxt = "n", xlab = NA)
+abline(v=c(4.25, 8))
+axis(1, at = c(1:3, 5:7, 9:11), labels = c(20,50,100,20,50,100,20,50,100))
+# add y-axis label
+axis(2, at = c(0,1,seq(2,15,by=3)),labels = c(0,1,seq(20,150,by=30)), las=1)
+legend(0.5,15.5,legend=c("Sigma1", "UR-EWMA", "DFEWMA"), cex=0.8, bty = "n", lty=c(NA, 1,2), pch=c(NA, 16,17))
+legend(4.25,15.5,legend=c("Sigma2", "UR-EWMA", "DFEWMA"), cex=0.8, bty = "n", lty=c(NA, 1,2), pch=c(NA, 16,17))
+legend(8,15.5,legend=c("Sigma3", "UR-EWMA", "DFEWMA"), cex=0.8, bty = "n", lty=c(NA, 1,2), pch=c(NA, 16,17))
+
+```
+
+```{r useless}
+Ranks <- R_I[(signal1[1,1]-W):signal1[1,1],]
+max_rank <- as.numeric(Ranks[, max_var])
+min_rank <- rep((1+d)/2, length(max_rank))
+a <- kmeans(t(Ranks),centers=rbind(max_rank,min_rank),iter.max=10,nstart = 20)
+b <- rowMeans(a$centers)
+signalind <- which(b==max(b))
+ran_cluster <- rbind(ran_cluster,c(abs(b[1]-b[2]), 
+           length(which(which(a$cluster==signalind,arr.ind=T)<=5)),
+           length(which(a$cluster==signalind))))
+p1=length(which(a$cluster==signalind))
+y <- as.numeric(R_I[1:signal1[1,1],signal1[1,2]])#
+s_lkh0<- 50
+s_lkh1<- 0
+for (i in 1:length(y)){
+  s_lkh0 <- c(s_lkh0, sum(tail(s_lkh0,i)))
+  s_lkh1 <- c(s_lkh1, sum(s_lkh1)+max(tail(y,i))-min(tail(y,i)))
+  }
+cp2 <- c(cp2, rev(tvec)[which.max(s_lkh1-s_lkh0)])
+
+p1 = d-r # d-a$size[sind1] #
+tvec = c(1:signal1[1,1])#
+ymu0 <- (1+d)/2
+ysd0 <- sqrt((d^2-1)/12*lambda/(2-lambda)*(1-(1-lambda)^(2*tvec)))
+ymu1 <- (1+d+p1)/2
+ysd1 <- sqrt(((d-p1)^2-1)/12*lambda/(2-lambda)*(1-(1-lambda)^(2*tvec)))
+lkh0 <- -0.5*log(2*pi*(ysd0^2))-0.5*(y-ymu0)^2/(ysd0^2)
+lkh1 <- -0.5*log(2*pi*(ysd1^2))-0.5*(y-ymu1)^2/(ysd1^2)
+s_lkh0<- NA
+s_lkh1<- NA
+for (i in 1:length(y)){
+  s_lkh0 <- c(s_lkh0, sum(tail(lkh0,i)))
+  s_lkh1 <- c(s_lkh1, sum(tail(lkh1,i)))
+  }
+cp1 <- c(cp1, rev(tvec)[which.max(s_lkh1-s_lkh0)]+1)
+```
+
