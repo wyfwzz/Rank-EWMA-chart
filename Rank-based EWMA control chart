@@ -1,0 +1,211 @@
+############################
+##### Library packages #####
+############################
+library(MASS) 
+library(dplyr)
+#####################
+##### Functions #####
+#####################
+##### F1. Data Generation ##### 
+hete_sample <- function(d, htsdtt, t, Sigma, on, delta,r){
+  mu = rep(0,d)
+  size <- rep_len(htsdtt, t)
+  Limatrix <- lapply(size, function(x){result <-x*Sigma; return(result)})
+  sample <- matrix(NA, d, t)
+  for(i in 1:t){
+    sample[,i] <- mvrnorm(1, mu, Limatrix[[i]])
+  }
+  shift <- rep(delta, t-on) ##*sqrt(size[(t-on+1):t])
+  sample[1:r, (on+1):t] <- sample[1:r, (on+1):t]+shift
+  return(t(sample))
+} 
+##### F2. Computing Rank based EWMA statistics #####
+EWMAR_all <- function(data, lambda){ 
+  d <- ncol(data)
+  t <- nrow(data)
+  z0 <- (1+d)/2
+  EWMA_all <- rep(z0, d)
+  for (i in 1:t){
+    Data_I <- as.matrix(data[1:i,])
+    vec1 <- rev(c(0:(i-1)))
+    lamb_vec <- (1-lambda)^vec1
+    if(i==1){
+      R_I <- rank(Data_I)
+      EWM <- lamb_vec * R_I
+      EWMA_R <- lambda*EWM + (1-lambda)^i*z0
+      }else{ 
+        R_I <- t(apply(Data_I, 1, rank)) #rank min = 1, max= d
+        EWM <- lamb_vec * R_I
+        EWMA_R <- lambda * colSums(EWM)+ (1-lambda)^i*z0}
+    EWMA_all <- rbind(EWMA_all, EWMA_R)
+  }
+  EWMA_Rank <- cbind(c(0:t), apply(EWMA_all, 1, max), apply(EWMA_all, 1, min))
+  EWMA_all <- cbind(c(0:t), EWMA_all)
+  return(list(EWMA_all, EWMA_Rank))
+} 
+##### F3. Computing Control limits #####
+CL <- function (t, lambda, d, alpha){
+  tvec = c(1:t)
+  ymu <- (1+d)/2
+  ysd <- sqrt((d^2-1)/12*lambda/(2-lambda)*(1-(1-lambda)^(2*tvec)))
+  max_ucl_the <- c(ymu,qnorm((1-alpha)^(1/d), mean = ymu, sd = ysd))
+  min_lcl_the <- c(ymu,qnorm(1-(1-alpha)^(1/d), mean = ymu, sd = ysd))
+  return(cbind(max_ucl_the, min_lcl_the))
+}
+##### F4. Searching for FAR #####
+a_search <- function(Data_IC, FAP, alpha, D, e){
+  FAP_hat <- c(0,0)
+  n <- 100
+  while (abs(FAP_hat[1]+FAP_hat[2]-2*FAP)>2*D && alpha >=0){
+    FA = c()
+    FAR = c()
+    print(alpha)
+    d <- ncol(Data_IC)
+    cl <- CL(n, lambda, d, alpha)
+    max_ucl_the <- cl[,1]
+    min_lcl_the <- cl[,2]
+    for(i in 1:1000){
+      sam_data<-Data_IC[sample(c(1:nrow(Data_IC)),
+                               n,replace=TRUE),]
+      EWMA <- EWMAR_all(sam_data, lambda)[[2]]
+      max_EWMA <- EWMA[,2]
+      min_EWMA <- EWMA[,3]
+      signal_maxu <- EWMA[which(max_EWMA>max_ucl_the),1]
+      signal_minl <- EWMA[which(min_EWMA<min_lcl_the),1]
+      FA <- rbind(FA,suppressWarnings(c(min(signal_maxu),min(signal_minl))))
+    }
+    FAP_hat <- c(length(which(FA[,1] != Inf)),
+                 length(which(FA[,2] != Inf)))/nrow(FA)
+    if(FAP_hat[1]+FAP_hat[2]-2*FAP>2*D){
+      alpha <- alpha-e
+      }else if(FAP_hat[1]+FAP_hat[2]-2*FAP<2*(-D)){
+        alpha <- alpha+e
+        }
+    print(FAP_hat)
+    }
+  return(c(alpha, FAP_hat))
+}
+##### F5. Monitoring a process #####
+sim_EWMArank <- function(data, lambda, on, max_ucl_the, min_lcl_the){
+  EWMA <- EWMAR_all(data, lambda)[[2]]
+  max_EWMA <- EWMA[,2]
+  min_EWMA <- EWMA[,3]
+  signal_maxu <- unname(EWMA[which(max_EWMA>max_ucl_the),1])
+  signal_minl <- unname(EWMA[which(min_EWMA<min_lcl_the),1])
+  max_sta <- suppressWarnings(signal_maxu[which(signal_maxu>=on)[1]]-on)
+  min_sta <- suppressWarnings(signal_minl[which(signal_minl>=on)[1]]-on)
+  return(c(max_sta, min_sta))
+}
+##### F6. Identify shifted variables #####
+variable_diag <- function(EWMA_all,EWMA_CL,increase,on,back,W){
+  if(increase ==TRUE){
+  max_ucl <- EWMA_CL[,1]
+  signal <- which(EWMA_all > max_ucl, arr.ind = T)
+  signal <- signal[order(signal[,1]),]
+  signal1 <- signal[which(signal[,1] >= on, arr.ind = T),]
+  max_var <- signal1[1,2]
+  if (back==TRUE){
+    EWMA_all_S <- EWMA_all[(signal1[1,1]-W+1):signal1[1,1],]
+    }else{
+      EWMA_all_S <- EWMA_all[signal1[1,1]:(signal1[1,1]+W-1),]
+      }
+  max_center <- as.numeric(EWMA_all_S[,max_var])
+  min_center <- as.numeric(apply(EWMA_all_S, 1, min))
+  mid_center <- rep((1+d)/2, length(max_center))
+  a <- kmeans(t(EWMA_all_S), centers = rbind(max_center, mid_center, min_center), iter.max = 20, nstart = 5)#
+  }else{
+    min_lcl <- EWMA_CL[,2]
+    signal <- which(EWMA_all < min_lcl, arr.ind = T)
+    signal <- signal[order(signal[,1]),]
+    signal1 <- signal[which(signal[,1] >= on, arr.ind = T),]
+    min_var <- signal1[1,2]
+    if (back==TRUE){
+      EWMA_all_S <- EWMA_all[(signal1[1,1]-W+1):signal1[1,1],]
+      }else{
+        EWMA_all_S <- EWMA_all[signal1[1,1]:(signal1[1,1]+W-1),]
+        }
+    min_center <- as.numeric(EWMA_all_S[,min_var])
+    max_center <- as.numeric(apply(EWMA_all_S, 1, max))
+    mid_center <- rep((1+d)/2, length(max_center))
+    a <- kmeans(t(EWMA_all_S), centers = rbind(min_center, max_center, mid_center), iter.max = 20, nstart = 5)#
+  }
+  result <- list(signal, signal1[1,], a)
+  names(result) <- c("all_signals", "target_signal","k-mean")
+  return(result)
+}
+##### F7. Change point estimate #####
+cpe <- function(EWMA_all, cluster_list, increase){
+  OC_EWMA <- EWMA_all[1:cluster_list$target_signal[1], which(cluster_list$`k-mean`$cluster==1,arr.ind= T)]
+  cp_W <- NA
+  cp <- NA
+  if (increase==TRUE){
+    if(cluster_list$`k-mean`$size[1]==1){
+    sig_p <- cluster_list$target_signal
+    y <- as.numeric(EWMA_all[1:sig_p[1],sig_p[2]])#
+    cp <- c(cp,max(which(y-(1+d)/2<0)))
+    cp[is.infinite(cp)] <- NA 
+    }else{
+      sig_p <- cluster_list$target_signal
+      for (j in 1:cluster_list$`k-mean`$size[1]){
+        v <- as.numeric(OC_EWMA[,j])
+        cp_W <-c(cp_W, max(which(v-(1+d)/2<0)))
+        }
+      y <- as.numeric(EWMA_all[1:sig_p[1],sig_p[2]])#
+      cp <- c(cp,max(which(y-(1+d)/2<0)))
+      cp[is.infinite(cp)] <- NA 
+      cp_W[is.infinite(cp_W)] <- NA 
+      }
+  }else{
+      if(cluster_list$`k-mean`$size[1]==1){
+        sig_p <- cluster_list$target_signal
+        y <- as.numeric(EWMA_all[1:sig_p[1],sig_p[2]])#
+        cp <- c(cp,max(which(y-(1+d)/2>0)))
+        cp[is.infinite(cp)] <- NA 
+        }else{
+          sig_p <- cluster_list$target_signal
+          for (j in 1:cluster_list$`k-mean`$size[1]){
+            v <- as.numeric(OC_EWMA[,j])
+            cp_W <-c(cp_W, max(which(v-(1+d)/2>0)))
+            }
+          y <- as.numeric(EWMA_all[1:sig_p[1],sig_p[2]])#
+          cp <- c(cp,max(which(y-(1+d)/2>0)))
+          cp[is.infinite(cp)] <- NA 
+          cp_W[is.infinite(cp_W)] <- NA 
+        }
+    }
+  return(list(cp, cp_W))
+}
+
+#########################################
+##### Applying the proposed method ######
+#########################################
+##### 1. Basic setting #####
+d = 50 #Dimensionality
+htsdtt <- c(seq(0.1, 1.9, 0.1)^2, rev(seq(0.1, 1.9, 0.1)^2)) #Define heteroscedasticity
+lambda = 0.1 #Smoothing parameter for EWMa statistics
+Sigma = diag(d) #Sigma 
+##### 2. Computing Control limits #####
+FAP = 0.1 #Target FAP for determing control limits 
+D = 0.01 #Determin the precision of control limits estimate
+on = 200 #Number of IC data
+alpha = 0.003 #Starting alpha
+e = 0.001 #Step of alpha
+Data_IC <- hete_sample(d, htsdtt, (on+1), Sigma, on, 0, 0)[1:on,] #Generate in-control data
+a_search(Data_IC, FAP, alpha, D, e) #Estimate alpha 
+##### 3. Monitoring a process #####
+t = 200 #Length of process
+on = 100 ##Change point
+delta = 0.5 #Shift size
+r = 5 #Number of shift variables
+alpha = 0.0045 #Estimated results from a_search
+EWMA_CL <- CL(t, lambda, d, alpha) #Computing control limits 
+max_ucl_the <- EWMA_CL[,1]
+min_lcl_the <- EWMA_CL[,2]
+data <- hete_sample(d,htsdtt,t, Sigma, on,delta,r) #Generate out-of-control data
+sim_EWMArank(data,lambda, on, max_ucl_the,min_lcl_the) #Detect signal of the process
+##### 4. Signal Diagnosis #####
+increase =TRUE
+W=5
+back = TRUE
+cluster_list <- variable_diag(EWMA_all[[1]], EWMA_CL, increase, on, back, W)
+cps<-cpe(EWMA_all[[1]],cluster_list,increase)[[2]]
